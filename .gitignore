@@ -137,3 +137,15 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Electron
+out/
+dist-electron/
+dist/
+
+# Build output
+build/*.js
+build/*.map
+
+# Test temp files
+tests/_*
