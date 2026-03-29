@@ -67,19 +67,21 @@ export function useTerminal(
       }
     })
 
-    // 创建 PTY 会话
-    try {
-      await window.electronAPI.terminal.create({
-        id: terminalId,
-        cols: term.cols || 80,
-        rows: term.rows || 24,
-        cwd
-      })
-      ready.value = true
-    } catch (err) {
-      console.error('[useTerminal] Failed to create PTY:', err)
-      term.writeln('\r\n\x1b[31mFailed to create terminal session\x1b[0m')
-      return
+    // 创建 PTY 会话（如果 PTY 已存在则跳过——布局重建时复用）
+    if (!ready.value) {
+      try {
+        await window.electronAPI.terminal.create({
+          id: terminalId,
+          cols: term.cols || 80,
+          rows: term.rows || 24,
+          cwd
+        })
+        ready.value = true
+      } catch (err) {
+        console.error('[useTerminal] Failed to create PTY:', err)
+        term.writeln('\r\n\x1b[31mFailed to create terminal session\x1b[0m')
+        return
+      }
     }
 
     // 用户输入 -> PTY
@@ -108,20 +110,33 @@ export function useTerminal(
     resizeObserver.observe(el)
   }
 
-  function dispose(): void {
+  // 清理 xterm DOM，但保留 PTY 会话（布局变化时用）
+  function detach(): void {
     cleanupOutput?.()
     cleanupOutput = null
     resizeObserver?.disconnect()
     resizeObserver = null
+    terminal.value?.dispose()
+    terminal.value = null
+    // 注意：不销毁 PTY，ready 保持不变
+  }
+
+  // 完全销毁（关闭项目时用）
+  function dispose(): void {
+    detach()
     if (ready.value) {
       window.electronAPI.terminal.destroy(terminalId)
       ready.value = false
     }
-    terminal.value?.dispose()
-    terminal.value = null
   }
 
-  onBeforeUnmount(dispose)
+  async function restart(): Promise<void> {
+    dispose()
+    await init()
+  }
 
-  return { terminal, fitAddon, ready, init, dispose }
+  // 布局变化导致组件卸载时只 detach，不销毁 PTY
+  onBeforeUnmount(detach)
+
+  return { terminal, fitAddon, ready, init, dispose, restart }
 }

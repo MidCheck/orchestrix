@@ -1,9 +1,12 @@
 {
   "name": "orchestrix",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Orchestrate multiple AI agents across projects — all in one workspace.",
   "main": "./out/main/index.js",
-  "author": "Orchestrix",
+  "author": {
+    "name": "Orchestrix",
+    "email": "orchestrix@users.noreply.github.com"
+  },
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
@@ -30,6 +33,7 @@
     "@codemirror/language": "^6.12.3",
     "@codemirror/legacy-modes": "^6.5.2",
     "@codemirror/merge": "^6.12.1",
+    "@codemirror/search": "^6.6.0",
     "@codemirror/state": "^6.6.0",
     "@codemirror/theme-one-dark": "^6.1.3",
     "@codemirror/view": "^6.40.0",

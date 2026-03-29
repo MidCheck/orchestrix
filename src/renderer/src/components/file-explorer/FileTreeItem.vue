@@ -96,6 +96,13 @@ async function loadChildren(): Promise<void> {
   loading.value = false
 }
 
+// --- 文件拖拽到编辑器 ---
+function onFileDragStart(e: DragEvent): void {
+  if (props.entry.isDirectory) { e.preventDefault(); return }
+  e.dataTransfer!.setData('application/x-orchestrix-file', props.entry.path)
+  e.dataTransfer!.effectAllowed = 'copy'
+}
+
 // --- 右键菜单 ---
 
 function onContextMenu(e: MouseEvent): void {
@@ -210,8 +217,10 @@ function handleChildRefresh(parentPath: string): void {
       class="item-row"
       :class="{ 'is-active': isActive }"
       :style="{ paddingLeft: `${depth * 16 + 8}px`, color: gitColor || undefined }"
+      :draggable="!entry.isDirectory"
       @click="handleClick"
       @contextmenu="onContextMenu"
+      @dragstart="onFileDragStart"
     >
       <span v-if="entry.isDirectory" class="icon">{{ isExpanded ? '▼' : '▶' }}</span>
       <span v-else class="icon file-icon">·</span>

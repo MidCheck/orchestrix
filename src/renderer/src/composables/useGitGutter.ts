@@ -4,26 +4,53 @@ import {
   GutterMarker
 } from '@codemirror/view'
 import { StateField, StateEffect, RangeSetBuilder } from '@codemirror/state'
-import type { GitDiffHunk } from '@shared/types'
 
-// 修改行标记（gutter marker）
-class DiffGutterMarker extends GutterMarker {
+// VS Code 风格的 change 类型
+export interface GutterChange {
+  type: 'added' | 'modified' | 'deleted'
+  modifiedStartLine: number  // 1-based; deleted 类型标记在此行之后
+  modifiedEndLine: number    // 1-based; deleted 类型为 0
+}
+
+// --- Gutter Markers ---
+
+class AddedMarker extends GutterMarker {
   toDOM(): HTMLElement {
     const el = document.createElement('div')
-    el.className = 'git-diff-mark'
+    el.className = 'git-gutter-added'
     return el
   }
 }
 
-const diffMarker = new DiffGutterMarker()
+class ModifiedMarker extends GutterMarker {
+  toDOM(): HTMLElement {
+    const el = document.createElement('div')
+    el.className = 'git-gutter-modified'
+    return el
+  }
+}
 
-const setDiffHunks = StateEffect.define<GitDiffHunk[]>()
+class DeletedMarker extends GutterMarker {
+  toDOM(): HTMLElement {
+    const el = document.createElement('div')
+    el.className = 'git-gutter-deleted'
+    return el
+  }
+}
 
-const diffHunksField = StateField.define<GitDiffHunk[]>({
+const addedMarker = new AddedMarker()
+const modifiedMarker = new ModifiedMarker()
+const deletedMarker = new DeletedMarker()
+
+// --- State ---
+
+const setGutterChanges = StateEffect.define<GutterChange[]>()
+
+const gutterChangesField = StateField.define<GutterChange[]>({
   create: () => [],
   update(value, tr) {
     for (const e of tr.effects) {
-      if (e.is(setDiffHunks)) return e.value
+      if (e.is(setGutterChanges)) return e.value
     }
     return value
   }
@@ -32,14 +59,28 @@ const diffHunksField = StateField.define<GitDiffHunk[]>({
 const diffGutter = gutter({
   class: 'cm-git-diff-gutter',
   markers(view) {
-    const hunks = view.state.field(diffHunksField)
+    const changes = view.state.field(gutterChangesField)
     const builder = new RangeSetBuilder<GutterMarker>()
-    for (const hunk of hunks) {
-      for (let i = 0; i < hunk.lineCount; i++) {
-        const lineNum = hunk.startLine + i
-        if (lineNum <= view.state.doc.lines) {
-          const line = view.state.doc.line(lineNum)
-          builder.add(line.from, line.from, diffMarker)
+    const doc = view.state.doc
+
+    // 按行号排序（RangeSetBuilder 要求 sorted）
+    const sorted = [...changes].sort((a, b) => a.modifiedStartLine - b.modifiedStartLine)
+
+    for (const change of sorted) {
+      if (change.type === 'deleted') {
+        // 红三角：标记在 modifiedStartLine 行尾（如果该行存在）
+        const lineNum = Math.min(change.modifiedStartLine, doc.lines)
+        if (lineNum > 0) {
+          const line = doc.line(lineNum)
+          builder.add(line.from, line.from, deletedMarker)
+        }
+      } else {
+        const marker = change.type === 'added' ? addedMarker : modifiedMarker
+        for (let l = change.modifiedStartLine; l <= change.modifiedEndLine; l++) {
+          if (l > 0 && l <= doc.lines) {
+            const line = doc.line(l)
+            builder.add(line.from, line.from, marker)
+          }
         }
       }
     }
@@ -47,7 +88,8 @@ const diffGutter = gutter({
   }
 })
 
-// CSS: 蓝色密集斜虚线（类似 VS Code 的修改标记）
+// --- CSS Theme ---
+
 const gitGutterTheme = EditorView.theme({
   '.cm-git-diff-gutter': {
     width: '4px',
@@ -56,27 +98,40 @@ const gitGutterTheme = EditorView.theme({
   '.cm-git-diff-gutter .cm-gutterElement': {
     padding: '0'
   },
-  '.git-diff-mark': {
+  // 绿色实线条 — 新增行
+  '.git-gutter-added': {
     width: '4px',
     height: '100%',
-    background: `repeating-linear-gradient(
-      -45deg,
-      #89b4fa 0px,
-      #89b4fa 1px,
-      transparent 1px,
-      transparent 3px
-    )`
+    background: '#a6e3a1'
+  },
+  // 蓝色实线条 — 修改行
+  '.git-gutter-modified': {
+    width: '4px',
+    height: '100%',
+    background: '#89b4fa'
+  },
+  // 红色三角形 — 删除行（CSS border trick，放在 gutter element 顶部）
+  '.git-gutter-deleted': {
+    width: '0',
+    height: '0',
+    position: 'relative',
+    top: '-2px',
+    borderLeft: '4px solid transparent',
+    borderRight: '4px solid transparent',
+    borderBottom: '5px solid #f38ba8'
   }
 })
 
+// --- Exports ---
+
 export function gitGutterExtensions() {
   return [
-    diffHunksField,
+    gutterChangesField,
     diffGutter,
     gitGutterTheme
   ]
 }
 
-export function updateDiffHunks(view: EditorView, hunks: GitDiffHunk[]): void {
-  view.dispatch({ effects: setDiffHunks.of(hunks) })
+export function updateGutterChanges(view: EditorView, changes: GutterChange[]): void {
+  view.dispatch({ effects: setGutterChanges.of(changes) })
 }

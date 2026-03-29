@@ -27,6 +27,8 @@ export const IPC = {
   FILE_DELETE: 'file:delete',
   FILE_RENAME: 'file:rename',
   FILE_MKDIR: 'file:mkdir',
+  FILE_WATCH: 'file:watch',
+  FILE_CHANGED: 'file:changed',
 
   // Git 相关
   GIT_STATUS: 'git:status',

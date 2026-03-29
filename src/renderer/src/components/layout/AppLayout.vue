@@ -1,58 +1,76 @@
 <script setup lang="ts">
+import { onMounted, onBeforeUnmount } from 'vue'
 import { useUIStore } from '../../stores/ui'
 import { useWorkspaceStore } from '../../stores/workspace'
 import { useEditorStore } from '../../stores/editor'
 import Sidebar from './Sidebar.vue'
-import TerminalPane from '../terminal/TerminalPane.vue'
+import TerminalSplitContainer from '../terminal/TerminalSplitContainer.vue'
 import EditorLayer from '../editor/EditorLayer.vue'
 
 const uiStore = useUIStore()
 const workspaceStore = useWorkspaceStore()
 const editorStore = useEditorStore()
 
-function handlePaneClick(paneId: string): void {
+// --- 全局快捷键 ---
+function handleKeyDown(e: KeyboardEvent): void {
+  // Ctrl+` 或 Cmd+` 切换图层
+  if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+    e.preventDefault()
+    if (uiStore.activeLayer === 'terminal') {
+      if (editorStore.layoutRoot) uiStore.switchToEditor()
+    } else {
+      uiStore.switchToTerminal()
+    }
+    return
+  }
+
+  // Ctrl+Tab / Cmd+Tab 切换终端面板（仅在终端层）
+  if (e.ctrlKey && e.key === 'Tab' && uiStore.activeLayer === 'terminal') {
+    e.preventDefault()
+    const panes = uiStore.panes
+    if (panes.length < 2) return
+    const currentIdx = panes.findIndex((p) => p.id === uiStore.activePaneId)
+    const nextIdx = e.shiftKey
+      ? (currentIdx - 1 + panes.length) % panes.length
+      : (currentIdx + 1) % panes.length
+    switchToPane(panes[nextIdx].id)
+    return
+  }
+
+  // Ctrl+1~9 切换到第 N 个终端面板
+  if (e.ctrlKey && e.key >= '1' && e.key <= '9' && uiStore.activeLayer === 'terminal') {
+    const idx = parseInt(e.key) - 1
+    if (idx < uiStore.panes.length) {
+      e.preventDefault()
+      switchToPane(uiStore.panes[idx].id)
+    }
+    return
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', handleKeyDown))
+onBeforeUnmount(() => window.removeEventListener('keydown', handleKeyDown))
+
+function switchToPane(paneId: string): void {
   uiStore.setActivePane(paneId)
   const pane = uiStore.panes.find((p) => p.id === paneId)
-  if (pane?.projectId) {
-    workspaceStore.setActiveProject(pane.projectId)
-  }
+  if (pane?.projectId) workspaceStore.setActiveProject(pane.projectId)
 }
 
 async function handleAddProject(): Promise<void> {
   const project = await workspaceStore.addProject()
   if (!project) return
-  if (uiStore.panes.length < 3) {
-    uiStore.addPane({
-      id: `pane-${Date.now()}`,
-      terminalId: `term-${Date.now()}`,
-      projectId: project.id,
-      projectName: project.name,
-      projectPath: project.path,
-      agentId: null,
-      title: project.name
-    })
-  }
+  uiStore.addPane({
+    id: `pane-${Date.now()}`,
+    terminalId: `term-${Date.now()}`,
+    projectId: project.id,
+    projectName: project.name,
+    projectPath: project.path,
+    agentId: null,
+    title: project.name
+  })
 }
 
-// --- 终端面板拖拽排序 ---
-function onPaneDragStart(e: DragEvent, index: number): void {
-  e.dataTransfer!.setData('text/plain', String(index))
-  e.dataTransfer!.effectAllowed = 'move'
-}
-
-function onPaneDragOver(e: DragEvent): void {
-  e.preventDefault()
-  e.dataTransfer!.dropEffect = 'move'
-}
-
-function onPaneDrop(e: DragEvent, toIndex: number): void {
-  e.preventDefault()
-  const fromIndex = parseInt(e.dataTransfer!.getData('text/plain'), 10)
-  if (isNaN(fromIndex) || fromIndex === toIndex) return
-  uiStore.reorderPane(fromIndex, toIndex)
-  // 同步侧边栏项目顺序：按面板顺序重排 projects
-  workspaceStore.reorderByPanes(uiStore.panes)
-}
 </script>
 
 <template>
@@ -103,34 +121,13 @@ function onPaneDrop(e: DragEvent, toIndex: number): void {
 
       <!-- 图层容器 -->
       <div class="layer-container">
-        <!-- 第一层：终端（多面板并排） -->
+        <!-- 第一层：终端（可自由分栏布局） -->
         <div v-show="uiStore.activeLayer === 'terminal'" class="layer terminal-layer">
-          <div v-if="uiStore.panes.length > 0" class="panes-row">
-            <div
-              v-for="(pane, index) in uiStore.panes"
-              :key="pane.id"
-              class="pane-wrapper"
-              :class="{ active: uiStore.activePaneId === pane.id }"
-              @click="handlePaneClick(pane.id)"
-            >
-              <div
-                class="pane-header"
-                draggable="true"
-                @dragstart="onPaneDragStart($event, index)"
-                @dragover="onPaneDragOver"
-                @drop="onPaneDrop($event, index)"
-              >
-                <span class="pane-title">{{ pane.title }}</span>
-              </div>
-              <div class="pane-body">
-                <TerminalPane
-                  :terminal-id="pane.terminalId"
-                  :cwd="pane.projectPath ?? undefined"
-                />
-              </div>
-            </div>
-          </div>
-          <!-- 空状态：引导添加项目 -->
+          <TerminalSplitContainer
+            v-if="uiStore.terminalLayout"
+            :node="uiStore.terminalLayout"
+          />
+          <!-- 空状态 -->
           <div v-else class="empty-state">
             <p class="empty-title">Welcome to Orchestrix</p>
             <p class="empty-hint">Add a project to start working</p>
@@ -266,54 +263,6 @@ function onPaneDrop(e: DragEvent, toIndex: number): void {
   display: flex;
   flex-direction: column;
 }
-
-.panes-row {
-  flex: 1;
-  display: flex;
-  flex-direction: row;
-  gap: 1px;
-  background: #313244;
-  overflow: hidden;
-  min-height: 0;
-}
-
-.pane-wrapper {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  background: #1e1e2e;
-  border: 1px solid transparent;
-  transition: border-color 0.15s;
-}
-.pane-wrapper.active { border-color: #89b4fa; }
-
-.pane-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 28px;
-  padding: 0 8px;
-  background: #181825;
-  border-bottom: 1px solid #313244;
-  flex-shrink: 0;
-}
-
-.pane-title {
-  font-size: 12px;
-  color: #a6adc8;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.pane-close {
-  background: none; border: none; color: #6c7086;
-  cursor: pointer; font-size: 12px; padding: 2px 6px; border-radius: 3px; flex-shrink: 0;
-}
-.pane-close:hover { background: rgba(255,255,255,0.1); color: #f38ba8; }
-
-.pane-body { flex: 1; overflow: hidden; min-height: 0; }
 
 /* Empty state */
 .empty-state {

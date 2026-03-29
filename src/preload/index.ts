@@ -81,6 +81,15 @@ const electronAPI = {
     createDir: (dirPath: string): Promise<void> =>
       ipcRenderer.invoke(IPC.FILE_MKDIR, dirPath),
 
+    watchFile: (filePath: string): Promise<void> =>
+      ipcRenderer.invoke(IPC.FILE_WATCH, filePath),
+
+    onFileChanged: (callback: (filePath: string) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, filePath: string): void => callback(filePath)
+      ipcRenderer.on(IPC.FILE_CHANGED, handler)
+      return () => ipcRenderer.removeListener(IPC.FILE_CHANGED, handler)
+    },
+
     isGitRepo: (dirPath: string): Promise<boolean> =>
       ipcRenderer.invoke(IPC.GIT_IS_REPO, dirPath),
 

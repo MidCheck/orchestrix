@@ -1,4 +1,6 @@
-import { ipcMain, dialog } from 'electron'
+import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { watch as fsWatch, type FSWatcher } from 'fs'
+import { readFile as fsReadFile } from 'fs/promises'
 import { IPC } from '@shared/constants'
 import type { WorkspaceManager } from '../managers/workspace-manager'
 
@@ -68,14 +70,31 @@ export function registerWorkspaceIPC(workspaceManager: WorkspaceManager): void {
     await workspaceManager.createDirectory(dirPath)
   })
 
+  // 文件监听
+  const watchers = new Map<string, FSWatcher>()
+
+  ipcMain.handle(IPC.FILE_WATCH, (_event, filePath: string) => {
+    if (watchers.has(filePath)) return
+    try {
+      const watcher = fsWatch(filePath, { persistent: false }, (eventType) => {
+        if (eventType === 'change') {
+          for (const win of BrowserWindow.getAllWindows()) {
+            if (!win.isDestroyed()) {
+              win.webContents.send(IPC.FILE_CHANGED, filePath)
+            }
+          }
+        }
+      })
+      watchers.set(filePath, watcher)
+    } catch { /* ignore */ }
+  })
+
   // 读取二进制文件（返回 hex dump）
   ipcMain.handle(IPC.FILE_READ_BINARY, async (_event, filePath: string, offset?: number, length?: number) => {
-    const fs = await import('fs/promises')
-    const buf = await fs.readFile(filePath)
+    const buf = await fsReadFile(filePath)
     const start = offset || 0
     const end = length ? start + length : buf.length
     const slice = buf.slice(start, end)
-    // 返回 hex dump
     return (workspaceManager as any).formatHexDump(slice)
   })
 

@@ -5,8 +5,8 @@ import { EditorState, StateField, StateEffect } from '@codemirror/state'
 import { defaultKeymap, indentWithTab, history, historyKeymap } from '@codemirror/commands'
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, foldGutter, indentOnInput } from '@codemirror/language'
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
+import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { oneDark } from '@codemirror/theme-one-dark'
-// MergeView replaced by custom dual-editor diff
 import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
 import { html } from '@codemirror/lang-html'
@@ -31,9 +31,11 @@ import { powerShell } from '@codemirror/legacy-modes/mode/powershell'
 import { cmake } from '@codemirror/legacy-modes/mode/cmake'
 import { useEditorStore } from '../../stores/editor'
 import { useWorkspaceStore } from '../../stores/workspace'
-import { gitGutterExtensions, updateDiffHunks } from '../../composables/useGitGutter'
+import { gitGutterExtensions, updateGutterChanges, type GutterChange } from '../../composables/useGitGutter'
 import MediaPreview from './MediaPreview.vue'
 import HexEditor from './HexEditor.vue'
+import MergeEditor from './MergeEditor.vue'
+import { mergeConflictExtensions, updateConflicts, resolveConflict, detectConflicts, type ConflictRegion } from '../../composables/useMergeConflict'
 import type { GitBlameLine } from '@shared/types'
 
 const props = defineProps<{ groupId: string }>()
@@ -47,23 +49,34 @@ let editorView: EditorView | null = null
 let diffLeftView: EditorView | null = null
 let diffRightView: EditorView | null = null
 let currentFilePath: string | null = null
+let isLocalEdit = false // 防止同步循环
 const diffMode = ref(false)
 const diffSplit = ref(50) // 左侧百分比
+const mergeMode = ref(false) // 三向合并编辑器模式
+const hasConflicts = ref(false) // 当前文件是否有合并冲突
 
 // Blame 数据 + 当前光标所在行的 inline blame
 const blameData = ref<GitBlameLine[]>([])
 const inlineBlame = ref<{ line: number; text: string } | null>(null)
 
-// Diff hunk inline view（点击蓝色虚线时显示）
+// VS Code 风格的 change 对象（同时记录原始和修改后的行范围）
+interface LineChange {
+  originalStartLine: number  // 1-based, 0 = pure insertion
+  originalEndLine: number    // 1-based, 0 = pure insertion
+  modifiedStartLine: number  // 1-based, 0 = pure deletion
+  modifiedEndLine: number    // 1-based, 0 = pure deletion
+}
+
+// Diff hunk inline view
 interface DiffHunkView {
-  hunkIndex: number
-  startLine: number
-  lineCount: number
-  oldLines: Array<{ num: number; text: string }>
+  changeIndex: number
+  change: LineChange
+  oldLines: Array<{ num: number; text: string; type: 'deleted' | 'context' }>
+  newLines: Array<{ num: number; text: string; type: 'added' | 'context' }>
   top: number
 }
 const diffHunkView = ref<DiffHunkView | null>(null)
-const diffHunksData = ref<Array<{ startLine: number; lineCount: number }>>([])
+const diffChanges = ref<LineChange[]>([])
 
 const group = computed(() => editorStore.groups[props.groupId])
 const isActive = computed(() => editorStore.activeGroupId === props.groupId)
@@ -205,7 +218,35 @@ const inlineBlameStyle = computed(() => {
 function handleEditorClick(e: MouseEvent): void {
   const target = e.target as HTMLElement
 
-  // 点击蓝色虚线（diff gutter）→ 显示 inline diff
+  // 点击合并冲突的内联按钮（Accept Current / Incoming / Both / Compare）
+  if (target.classList.contains('conflict-action') && editorView) {
+    e.stopPropagation()
+    const idx = parseInt(target.dataset.conflictIndex || '', 10)
+    const action = target.dataset.conflictAction as 'current' | 'incoming' | 'both' | 'compare'
+    if (isNaN(idx)) return
+
+    const regions = detectConflicts(editorView.state.doc.toString())
+    if (idx >= regions.length) return
+
+    if (action === 'compare') {
+      mergeMode.value = true
+    } else {
+      resolveConflict(editorView, editorView.state.doc.toString(), regions[idx], action)
+      requestAnimationFrame(() => {
+        if (!editorView) return
+        const newContent = editorView.state.doc.toString()
+        const newRegions = detectConflicts(newContent)
+        hasConflicts.value = newRegions.length > 0
+        updateConflicts(editorView, newRegions)
+        if (currentFilePath) {
+          editorStore.updateContent(currentFilePath, newContent)
+        }
+      })
+    }
+    return
+  }
+
+  // 点击 gutter 颜色条/红三角 → 显示 inline diff 弹窗
   if (target.closest('.cm-git-diff-gutter') && editorView) {
     const scrollerRect = editorView.scrollDOM.getBoundingClientRect()
     const y = e.clientY - scrollerRect.top + editorView.scrollDOM.scrollTop
@@ -213,42 +254,57 @@ function handleEditorClick(e: MouseEvent): void {
       const block = editorView.lineBlockAtHeight(y)
       const line = editorView.state.doc.lineAt(block.from)
       const lineNum = line.number
+      const currentLines = editorView.state.doc.toString().split('\n')
 
-      const hunkIdx = diffHunksData.value.findIndex(
-        (h) => lineNum >= h.startLine && lineNum < h.startLine + h.lineCount
-      )
-      if (hunkIdx === -1) return
+      // 找到包含该行的 change（支持 added / modified / deleted 三种）
+      const changeIdx = diffChanges.value.findIndex((c) => {
+        if (c.modifiedStartLine > 0 && c.modifiedEndLine > 0) {
+          // added 或 modified：行在 modified 范围内
+          return lineNum >= c.modifiedStartLine && lineNum <= c.modifiedEndLine
+        }
+        // deleted：红三角标记在 anchor+1 行
+        const rawAnchor = (c as any)._deleteAnchor ?? 0
+        const anchorLine = Math.max(1, Math.min(rawAnchor + 1, currentLines.length))
+        return lineNum === anchorLine
+      })
+      if (changeIdx === -1) return
 
-      // toggle：再次点击同一个 hunk 关闭
-      if (diffHunkView.value?.hunkIndex === hunkIdx) {
+      // toggle
+      if (diffHunkView.value?.changeIndex === changeIdx) {
         diffHunkView.value = null
         return
       }
 
-      const hunk = diffHunksData.value[hunkIdx]
-      const oldLines: Array<{ num: number; text: string }> = []
+      const change = diffChanges.value[changeIdx]
 
-      if (headLines.length > 0) {
-        const start = Math.max(0, hunk.startLine - 1)
-        const end = Math.min(headLines.length, hunk.startLine - 1 + hunk.lineCount)
-        for (let i = start; i < end; i++) {
-          oldLines.push({ num: i + 1, text: headLines[i] })
+      // 提取 HEAD 中对应的原始行（deleted 和 modified 有内容，added 无）
+      const oldLines: Array<{ num: number; text: string; type: 'deleted' | 'context' }> = []
+      if (change.originalStartLine > 0 && headLines.length > 0) {
+        for (let i = change.originalStartLine - 1; i <= change.originalEndLine - 1 && i < headLines.length; i++) {
+          oldLines.push({ num: i + 1, text: headLines[i], type: 'deleted' })
         }
       }
 
-      // 如果 HEAD 中该范围没有内容（纯新增行），标记为新增
-      if (oldLines.length === 0) {
-        oldLines.push({ num: 0, text: '(new lines — no previous content)' })
+      // 提取 modified 中对应的新行（added 和 modified 有内容，deleted 无）
+      const newLines: Array<{ num: number; text: string; type: 'added' | 'context' }> = []
+      if (change.modifiedStartLine > 0 && change.modifiedEndLine > 0) {
+        for (let i = change.modifiedStartLine - 1; i <= change.modifiedEndLine - 1 && i < currentLines.length; i++) {
+          newLines.push({ num: i + 1, text: currentLines[i], type: 'added' })
+        }
       }
 
-      const hunkStartLine = editorView.state.doc.line(hunk.startLine)
-      const topPx = editorView.lineBlockAt(hunkStartLine.from).top - editorView.scrollDOM.scrollTop
+      // 计算弹窗位置
+      const anchorLineNum = change.modifiedStartLine > 0
+        ? change.modifiedStartLine
+        : Math.max(1, Math.min(((change as any)._deleteAnchor ?? 0) + 1, editorView.state.doc.lines))
+      const anchorDocLine = editorView.state.doc.line(anchorLineNum)
+      const topPx = editorView.lineBlockAt(anchorDocLine.from).top - editorView.scrollDOM.scrollTop
 
       diffHunkView.value = {
-        hunkIndex: hunkIdx,
-        startLine: hunk.startLine,
-        lineCount: hunk.lineCount,
+        changeIndex: changeIdx,
+        change,
         oldLines,
+        newLines,
         top: topPx
       }
       return
@@ -261,38 +317,104 @@ function handleEditorClick(e: MouseEvent): void {
   }
 }
 
-// 基于内存中 HEAD 内容 vs 当前编辑器内容重算 diff 标记
+// 基于 LCS 计算 LineChange 数组（类似 VS Code 的 IChange）
+function computeLineChanges(origLines: string[], modLines: string[]): LineChange[] {
+  const m = origLines.length, n = modLines.length
+  if (m > 3000 || n > 3000) return []
+
+  // LCS DP
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0))
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = origLines[i - 1] === modLines[j - 1]
+        ? dp[i - 1][j - 1] + 1
+        : Math.max(dp[i - 1][j], dp[i][j - 1])
+    }
+  }
+
+  // 回溯生成编辑操作序列
+  const ops: Array<{ type: 'equal' | 'delete' | 'insert'; origIdx: number; modIdx: number }> = []
+  let i = m, j = n
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && origLines[i - 1] === modLines[j - 1]) {
+      ops.push({ type: 'equal', origIdx: i, modIdx: j })
+      i--; j--
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      ops.push({ type: 'insert', origIdx: i, modIdx: j })
+      j--
+    } else {
+      ops.push({ type: 'delete', origIdx: i, modIdx: j })
+      i--
+    }
+  }
+  ops.reverse()
+
+  // 将连续的 delete/insert 合并为 LineChange
+  const changes: LineChange[] = []
+  let idx = 0
+  while (idx < ops.length) {
+    if (ops[idx].type === 'equal') { idx++; continue }
+    let origStart = 0, origEnd = 0, modStart = 0, modEnd = 0
+    let deleteModPos = 0 // 删除发生时 modified 的位置
+    // 收集连续的 delete
+    while (idx < ops.length && ops[idx].type === 'delete') {
+      if (!origStart) origStart = ops[idx].origIdx
+      origEnd = ops[idx].origIdx
+      deleteModPos = ops[idx].modIdx // modIdx = 删除发生在 modified 第几行之后
+      idx++
+    }
+    // 收集连续的 insert
+    while (idx < ops.length && ops[idx].type === 'insert') {
+      if (!modStart) modStart = ops[idx].modIdx
+      modEnd = ops[idx].modIdx
+      idx++
+    }
+    // 纯删除时用 deleteModPos 作为锚点位置
+    const change: LineChange = {
+      originalStartLine: origStart,
+      originalEndLine: origEnd,
+      modifiedStartLine: modStart,
+      modifiedEndLine: modEnd
+    }
+    // 记录删除锚点（在 modified 文件中的行号，红三角标记在此行）
+    if (modStart === 0 && deleteModPos > 0) {
+      (change as any)._deleteAnchor = deleteModPos
+    }
+    changes.push(change)
+  }
+  return changes
+}
+
+// 重算 diff 标记
 function recomputeDiffMarks(): void {
   if (!editorView || headLines.length === 0) {
-    diffHunksData.value = []
-    if (editorView) updateDiffHunks(editorView, [])
+    diffChanges.value = []
+    if (editorView) updateGutterChanges(editorView, [])
     return
   }
 
   const currentLines = editorView.state.doc.toString().split('\n')
-  const hunks: Array<{ startLine: number; lineCount: number }> = []
+  const changes = computeLineChanges(headLines, currentLines)
+  diffChanges.value = changes
 
-  // 逐行比较，连续不同的行合并为一个 hunk
-  let hunkStart = -1
-  const maxLen = Math.max(currentLines.length, headLines.length)
-
-  for (let i = 0; i < currentLines.length; i++) {
-    const isDiff = i >= headLines.length || currentLines[i] !== headLines[i]
-    if (isDiff) {
-      if (hunkStart === -1) hunkStart = i
-    } else {
-      if (hunkStart !== -1) {
-        hunks.push({ startLine: hunkStart + 1, lineCount: i - hunkStart })
-        hunkStart = -1
-      }
+  // 转换为 GutterChange（绿=added, 蓝=modified, 红三角=deleted）
+  const gutterChanges: GutterChange[] = []
+  for (const c of changes) {
+    if (c.originalStartLine === 0 && c.modifiedStartLine > 0) {
+      // 纯新增
+      gutterChanges.push({ type: 'added', modifiedStartLine: c.modifiedStartLine, modifiedEndLine: c.modifiedEndLine })
+    } else if (c.modifiedStartLine === 0 && c.originalStartLine > 0) {
+      // 纯删除 — 红三角标记在删除点之后的行顶部
+      const rawAnchor = (c as any)._deleteAnchor ?? 0
+      // anchor+1 = 删除点后面的第一行；anchor=0 时用 line 1
+      const anchorLine = Math.max(1, Math.min(rawAnchor + 1, currentLines.length))
+      gutterChanges.push({ type: 'deleted', modifiedStartLine: anchorLine, modifiedEndLine: 0 })
+    } else if (c.modifiedStartLine > 0) {
+      // 修改
+      gutterChanges.push({ type: 'modified', modifiedStartLine: c.modifiedStartLine, modifiedEndLine: c.modifiedEndLine })
     }
   }
-  if (hunkStart !== -1) {
-    hunks.push({ startLine: hunkStart + 1, lineCount: currentLines.length - hunkStart })
-  }
-
-  diffHunksData.value = hunks
-  updateDiffHunks(editorView, hunks)
+  updateGutterChanges(editorView, gutterChanges)
 }
 
 // 节流的 diff 重算（编辑时不要每次按键都算）
@@ -301,28 +423,60 @@ function scheduleDiffUpdate(): void {
   diffUpdateTimer = setTimeout(() => recomputeDiffMarks(), 300)
 }
 
-// Revert 当前 hunk：用 HEAD 的旧内容替换当前 hunk 的行
+// VS Code 风格 revert：重建文件内容，保留所有其他变更，只还原被点击的那个 change
 function revertHunk(): void {
   if (!diffHunkView.value || !editorView) return
-  const hunk = diffHunkView.value
-  const doc = editorView.state.doc
+  const revertIndex = diffHunkView.value.changeIndex
+  const allChanges = diffChanges.value
+  const currentLines = editorView.state.doc.toString().split('\n')
 
-  // 当前 hunk 范围
-  const fromLine = doc.line(hunk.startLine)
-  const toLine = doc.line(Math.min(hunk.startLine + hunk.lineCount - 1, doc.lines))
+  // applyLineChanges: 用原始内容 + 修改内容 + 要保留的变更列表，重建文件
+  // 保留的变更 = 除了 revertIndex 以外的所有变更
+  const changesToKeep = allChanges.filter((_, i) => i !== revertIndex)
+  const result = applyLineChanges(headLines, currentLines, changesToKeep)
 
-  // HEAD 中对应的内容
-  const oldText = hunk.oldLines
-    .filter((l) => l.num > 0) // 排除 "(new lines)" 占位
-    .map((l) => l.text)
-    .join('\n')
-
+  // 替换整个编辑器内容
+  const newContent = result.join('\n')
   editorView.dispatch({
-    changes: { from: fromLine.from, to: toLine.to, insert: oldText }
+    changes: { from: 0, to: editorView.state.doc.length, insert: newContent }
   })
 
   diffHunkView.value = null
-  // 编辑触发后 scheduleDiffUpdate 会自动更新虚线
+}
+
+// 类似 VS Code staging.ts 的 applyLineChanges：
+// 从 original 出发，应用 changesToKeep 中记录的修改，忽略其他修改（= revert）
+function applyLineChanges(origLines: string[], modLines: string[], changesToKeep: LineChange[]): string[] {
+  const result: string[] = []
+  let origIdx = 0 // 0-based index into origLines
+
+  for (const change of changesToKeep) {
+    // 先复制 change 之前的未修改行（从 original）
+    const origBefore = change.originalStartLine > 0 ? change.originalStartLine - 1 : origIdx
+    while (origIdx < origBefore) {
+      result.push(origLines[origIdx])
+      origIdx++
+    }
+
+    // 应用这个 change（保留修改后的内容）
+    if (change.modifiedStartLine > 0) {
+      for (let m = change.modifiedStartLine - 1; m <= change.modifiedEndLine - 1; m++) {
+        if (m < modLines.length) result.push(modLines[m])
+      }
+    }
+    // 跳过 original 中对应的行
+    if (change.originalStartLine > 0) {
+      origIdx = change.originalEndLine
+    }
+  }
+
+  // 复制剩余的 original 行
+  while (origIdx < origLines.length) {
+    result.push(origLines[origIdx])
+    origIdx++
+  }
+
+  return result
 }
 
 function saveState(): void {
@@ -341,6 +495,15 @@ function createEditor(content: string, language: string, filePath: string): void
   if (editorView) { editorView.destroy(); editorView = null }
   currentFilePath = filePath
 
+  // 清空旧文件的残留状态
+  headContent = ''
+  headLines = []
+  diffChanges.value = []
+  diffHunkView.value = null
+  blameData.value = []
+  inlineBlame.value = null
+  hasConflicts.value = false
+
   const saved = editorStore.getCursorState(filePath)
   const selection = saved
     ? { anchor: Math.min(saved.anchor, content.length), head: Math.min(saved.head, content.length) }
@@ -354,17 +517,32 @@ function createEditor(content: string, language: string, filePath: string): void
         lineNumbers(), highlightActiveLineGutter(), highlightSpecialChars(),
         history(), foldGutter(), drawSelection(), indentOnInput(),
         bracketMatching(), closeBrackets(), highlightActiveLine(),
+        highlightSelectionMatches(),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         oneDark,
         keymap.of([
-          ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, indentWithTab,
+          ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap,
+          indentWithTab,
           { key: 'Mod-s', run: () => { editorStore.saveFile(); return true } }
         ]),
+        // 阻止 tab 拖拽的 JSON 被插入编辑器
+        EditorView.domEventHandlers({
+          drop(event) {
+            if (event.dataTransfer?.types.includes('application/x-orchestrix-tab')) {
+              event.preventDefault()
+              return true
+            }
+            return false
+          },
+        }),
         getLang(language),
         gitGutterExtensions(),
+        mergeConflictExtensions(),
         EditorView.updateListener.of((update) => {
           if (update.docChanged && currentFilePath) {
+            isLocalEdit = true
             editorStore.updateContent(currentFilePath, update.state.doc.toString())
+            isLocalEdit = false
             scheduleDiffUpdate()
           }
           if (update.selectionSet || update.docChanged) {
@@ -393,14 +571,24 @@ function createEditor(content: string, language: string, filePath: string): void
   // 异步加载 git blame 和 diff 数据
   loadGitData(filePath)
 
+  // 检测合并冲突
+  const regions = detectConflicts(content)
+  hasConflicts.value = regions.length > 0
+  if (regions.length > 0) {
+    updateConflicts(editorView, regions)
+  }
+
   editorView.focus()
 }
 
 watch(activeFileData, async (file) => {
-  // 切换文件时退出 diff 模式
+  // 切换文件时退出 diff / merge 模式
   if (diffMode.value) {
     destroyDiffViews()
     diffMode.value = false
+  }
+  if (mergeMode.value) {
+    mergeMode.value = false
   }
   await nextTick()
   if (file && file.path !== currentFilePath) {
@@ -412,6 +600,24 @@ watch(activeFileData, async (file) => {
   }
 }, { immediate: true })
 
+// 监听 store 中文件内容变化（其他 group 编辑 / 外部文件刷新时同步）
+watch(
+  () => activeFileData.value?.content,
+  (newContent) => {
+    if (!editorView || !newContent || isLocalEdit) return
+    // 必须是同一文件，避免文件切换时把新文件内容塞进旧编辑器
+    if (activeFileData.value?.path !== currentFilePath) return
+    const currentContent = editorView.state.doc.toString()
+    if (currentContent === newContent) return
+    const sel = editorView.state.selection.main
+    editorView.dispatch({
+      changes: { from: 0, to: editorView.state.doc.length, insert: newContent },
+      selection: { anchor: Math.min(sel.anchor, newContent.length) }
+    })
+    scheduleDiffUpdate()
+  }
+)
+
 onBeforeUnmount(() => {
   saveState()
   if (editorView) editorView.destroy()
@@ -422,7 +628,7 @@ onBeforeUnmount(() => {
 const dragOverZone = ref<string | null>(null)
 
 function onTabDragStart(e: DragEvent, filePath: string): void {
-  e.dataTransfer!.setData('text/plain', JSON.stringify({ filePath, fromGroupId: props.groupId }))
+  e.dataTransfer!.setData('application/x-orchestrix-tab', JSON.stringify({ filePath, fromGroupId: props.groupId }))
   e.dataTransfer!.effectAllowed = 'move'
 }
 
@@ -433,18 +639,25 @@ function onTabDragOver(e: DragEvent, targetIndex: number): void {
 
 function onTabDrop(e: DragEvent, targetIndex: number): void {
   e.preventDefault()
-  const raw = e.dataTransfer?.getData('text/plain')
+
+  // 从文件树拖入
+  const fileTreePath = e.dataTransfer?.getData('application/x-orchestrix-file')
+  if (fileTreePath) {
+    editorStore.openFile(fileTreePath, props.groupId)
+    return
+  }
+
+  // tab 内部拖拽
+  const raw = e.dataTransfer?.getData('application/x-orchestrix-tab')
   if (!raw) return
   const { filePath, fromGroupId } = JSON.parse(raw)
 
   if (fromGroupId === props.groupId) {
-    // 同 group 内排序
     const fromIndex = group.value!.files.indexOf(filePath)
     if (fromIndex !== -1 && fromIndex !== targetIndex) {
       editorStore.reorderFile(props.groupId, fromIndex, targetIndex)
     }
   } else {
-    // 跨 group 移动
     editorStore.moveFileToGroup(fromGroupId, props.groupId, filePath, targetIndex)
   }
   dragOverZone.value = null
@@ -473,19 +686,45 @@ function onEditorDragLeave(): void {
 
 function onEditorDrop(e: DragEvent): void {
   e.preventDefault()
-  const raw = e.dataTransfer?.getData('text/plain')
-  if (!raw) return
-  const { filePath, fromGroupId } = JSON.parse(raw)
   const zone = dragOverZone.value
   dragOverZone.value = null
 
+  // 情况 1：从文件树拖入文件
+  const fileTreePath = e.dataTransfer?.getData('application/x-orchestrix-file')
+  if (fileTreePath) {
+    if (zone === 'center' || !zone) {
+      // 在当前 group 中打开
+      editorStore.openFile(fileTreePath, props.groupId)
+    } else {
+      // 在新分栏中打开
+      const dir = (zone === 'left' || zone === 'right') ? 'horizontal' : 'vertical'
+      const pos = (zone === 'left' || zone === 'top') ? 'before' : 'after'
+      const newGid = `group-drop-${Date.now()}`
+      editorStore.groups[newGid] = { id: newGid, files: [], activeFile: null }
+      if (editorStore.layoutRoot) {
+        editorStore.layoutRoot = {
+          type: 'split', direction: dir,
+          children: pos === 'before'
+            ? [{ type: 'leaf', groupId: newGid }, editorStore.layoutRoot]
+            : [editorStore.layoutRoot, { type: 'leaf', groupId: newGid }],
+          sizes: [50, 50]
+        }
+      }
+      editorStore.openFile(fileTreePath, newGid)
+    }
+    return
+  }
+
+  // 情况 2：从 tab 拖入（editor 内部）
+  const raw = e.dataTransfer?.getData('application/x-orchestrix-tab')
+  if (!raw) return
+  const { filePath, fromGroupId } = JSON.parse(raw)
+
   if (zone === 'center' || !zone) {
-    // 合并到当前 group
     if (fromGroupId !== props.groupId) {
       editorStore.moveFileToGroup(fromGroupId, props.groupId, filePath)
     }
   } else {
-    // 分栏
     const dir = (zone === 'left' || zone === 'right') ? 'horizontal' : 'vertical'
     const pos = (zone === 'left' || zone === 'top') ? 'before' : 'after'
     editorStore.splitWithFile(props.groupId, filePath, fromGroupId, dir, pos)
@@ -717,6 +956,33 @@ function startDiffResize(e: MouseEvent): void {
   document.addEventListener('mousemove', onMove)
   document.addEventListener('mouseup', onUp)
 }
+
+// Tab 右键菜单
+const tabContextMenu = ref<{ x: number; y: number; filePath: string } | null>(null)
+
+function onTabContext(e: MouseEvent, filePath: string): void {
+  e.preventDefault()
+  tabContextMenu.value = { x: e.clientX, y: e.clientY, filePath }
+  const close = () => { tabContextMenu.value = null; document.removeEventListener('click', close) }
+  setTimeout(() => document.addEventListener('click', close), 0)
+}
+
+async function openInSplit(filePath: string): Promise<void> {
+  tabContextMenu.value = null
+  // 创建新 group 并打开同一文件
+  const newGid = `group-split-${Date.now()}`
+  editorStore.groups[newGid] = { id: newGid, files: [], activeFile: null }
+  // 插入 split 布局
+  if (editorStore.layoutRoot) {
+    editorStore.layoutRoot = {
+      type: 'split',
+      direction: 'horizontal',
+      children: [editorStore.layoutRoot, { type: 'leaf', groupId: newGid }],
+      sizes: [50, 50]
+    }
+  }
+  await editorStore.openFile(filePath, newGid)
+}
 </script>
 
 <template>
@@ -737,6 +1003,7 @@ function startDiffResize(e: MouseEvent): void {
         @dragover="onTabDragOver($event, index)"
         @drop="onTabDrop($event, index)"
         @click="editorStore.setActiveFile(props.groupId, file.path)"
+        @contextmenu="onTabContext($event, file.path)"
       >
         <span class="tab-name">
           <span v-if="isFileModified(file.path)" class="modified-dot" />
@@ -754,6 +1021,14 @@ function startDiffResize(e: MouseEvent): void {
       >
         {{ diffMode ? '✕ Diff' : '⇄ Diff' }}
       </button>
+      <button
+        v-if="hasConflicts && activeFileData?.kind === 'text' && !diffMode"
+        class="diff-btn merge"
+        :class="{ active: mergeMode }"
+        @click="mergeMode = !mergeMode"
+      >
+        {{ mergeMode ? '✕ Merge' : '⚡ Merge Editor' }}
+      </button>
     </div>
 
     <!-- 编辑器 + 拖拽分栏叠加层 -->
@@ -765,7 +1040,7 @@ function startDiffResize(e: MouseEvent): void {
       @click="handleEditorClick"
     >
       <!-- 文本编辑模式 -->
-      <div v-show="!diffMode && activeFileData?.kind === 'text'" v-if="activeFileData" ref="containerRef" class="cm-container" />
+      <div v-show="!diffMode && !mergeMode && activeFileData?.kind === 'text'" v-if="activeFileData" ref="containerRef" class="cm-container" />
 
       <!-- 图片/视频/音频预览 -->
       <MediaPreview
@@ -773,9 +1048,16 @@ function startDiffResize(e: MouseEvent): void {
         :file="activeFileData"
       />
 
+      <!-- 三向合并编辑器 -->
+      <MergeEditor
+        v-if="mergeMode && activeFileData"
+        :file-path="activeFileData.path"
+        :on-complete="() => { mergeMode = false; hasConflicts = false }"
+      />
+
       <!-- Hex Editor -->
       <HexEditor
-        v-if="activeFileData && activeFileData.kind === 'binary' && !diffMode"
+        v-if="activeFileData && activeFileData.kind === 'binary' && !diffMode && !mergeMode"
         :file="activeFileData"
       />
 
@@ -788,20 +1070,39 @@ function startDiffResize(e: MouseEvent): void {
         {{ inlineBlame.text }}
       </div>
 
-      <!-- Inline diff：点击蓝色虚线后显示 HEAD 旧代码（仅 text） -->
+      <!-- Inline diff peek：点击 gutter 颜色条/三角后显示变更对比（仅 text） -->
       <div
-        v-if="diffHunkView && !diffMode && activeFileData?.kind === 'text'"
+        v-if="diffHunkView && !diffMode && !mergeMode && activeFileData?.kind === 'text'"
         class="diff-hunk-inline"
         :style="{ top: diffHunkView.top + 'px' }"
       >
         <div class="hunk-toolbar">
+          <span class="hunk-type" v-if="diffHunkView.change.modifiedStartLine === 0">Deleted</span>
+          <span class="hunk-type added" v-else-if="diffHunkView.change.originalStartLine === 0">Added</span>
+          <span class="hunk-type modified" v-else>Modified</span>
+          <div class="hunk-toolbar-spacer" />
           <button class="hunk-action revert" @click="revertHunk" title="Revert this change">↩ Revert</button>
           <button class="hunk-action close" @click="diffHunkView = null">✕</button>
         </div>
         <div class="hunk-lines">
-          <div v-for="line in diffHunkView.oldLines" :key="line.num" class="hunk-line">
+          <!-- 删除的行（红色） -->
+          <div
+            v-for="line in diffHunkView.oldLines"
+            :key="'old-' + line.num"
+            class="hunk-line deleted"
+          >
             <span class="hunk-line-num">{{ line.num || '' }}</span>
             <span class="hunk-line-sign">-</span>
+            <span class="hunk-line-text">{{ line.text }}</span>
+          </div>
+          <!-- 新增的行（绿色） -->
+          <div
+            v-for="line in diffHunkView.newLines"
+            :key="'new-' + line.num"
+            class="hunk-line added"
+          >
+            <span class="hunk-line-num">{{ line.num || '' }}</span>
+            <span class="hunk-line-sign">+</span>
             <span class="hunk-line-text">{{ line.text }}</span>
           </div>
         </div>
@@ -829,6 +1130,18 @@ function startDiffResize(e: MouseEvent): void {
       <!-- 拖拽指示器 -->
       <div v-if="dragOverZone" class="drop-indicator" :class="dragOverZone" />
     </div>
+
+    <!-- Tab 右键菜单 -->
+    <Teleport to="body">
+      <div
+        v-if="tabContextMenu"
+        class="context-menu"
+        :style="{ left: tabContextMenu.x + 'px', top: tabContextMenu.y + 'px' }"
+      >
+        <div class="ctx-item" @click="openInSplit(tabContextMenu!.filePath)">Open in Split Right</div>
+        <div class="ctx-item" @click="editorStore.closeFile(props.groupId, tabContextMenu!.filePath); tabContextMenu = null">Close</div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -880,6 +1193,9 @@ function startDiffResize(e: MouseEvent): void {
 }
 .diff-btn:hover { color: #a6adc8; }
 .diff-btn.active { color: #f9e2af; }
+.diff-btn.merge { color: #f38ba8; }
+.diff-btn.merge:hover { color: #f5c2e7; }
+.diff-btn.merge.active { color: #f9e2af; }
 
 .diff-wrapper {
   display: flex;
@@ -969,13 +1285,20 @@ function startDiffResize(e: MouseEvent): void {
 
 .hunk-toolbar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
   gap: 4px;
-  padding: 2px 6px;
-  background: rgba(243, 139, 168, 0.1);
+  padding: 2px 8px;
+  background: #181825;
   border-bottom: 1px solid #313244;
   flex-shrink: 0;
 }
+
+.hunk-type {
+  font-size: 11px; font-weight: 600; color: #f38ba8;
+}
+.hunk-type.added { color: #a6e3a1; }
+.hunk-type.modified { color: #89b4fa; }
+.hunk-toolbar-spacer { flex: 1; }
 
 .hunk-action {
   background: none;
@@ -999,10 +1322,17 @@ function startDiffResize(e: MouseEvent): void {
 .hunk-line {
   display: flex;
   align-items: stretch;
-  background: rgba(243, 139, 168, 0.08);
   font-family: Menlo, Monaco, "Courier New", monospace;
   font-size: 13px;
   line-height: 20px;
+}
+
+.hunk-line.deleted {
+  background: rgba(243, 139, 168, 0.1);
+}
+
+.hunk-line.added {
+  background: rgba(166, 227, 161, 0.1);
 }
 
 .hunk-line-num {
@@ -1016,19 +1346,23 @@ function startDiffResize(e: MouseEvent): void {
 
 .hunk-line-sign {
   width: 14px;
-  color: #f38ba8;
   text-align: center;
   flex-shrink: 0;
   user-select: none;
 }
 
+.hunk-line.deleted .hunk-line-sign { color: #f38ba8; }
+.hunk-line.added .hunk-line-sign { color: #a6e3a1; }
+
 .hunk-line-text {
   flex: 1;
-  color: #cba6b5;
   white-space: pre;
   overflow-x: auto;
   padding-right: 12px;
 }
+
+.hunk-line.deleted .hunk-line-text { color: #cba6b5; }
+.hunk-line.added .hunk-line-text { color: #b5cba6; }
 
 .empty {
   display: flex; align-items: center; justify-content: center;
@@ -1048,4 +1382,12 @@ function startDiffResize(e: MouseEvent): void {
 .drop-indicator.top    { top: 0; left: 0; width: 100%; height: 50%; }
 .drop-indicator.bottom { bottom: 0; left: 0; width: 100%; height: 50%; }
 .drop-indicator.center { top: 4px; left: 4px; right: 4px; bottom: 4px; }
+
+/* Tab 右键菜单 */
+.context-menu {
+  position: fixed; z-index: 9999; background: #313244; border: 1px solid #45475a;
+  border-radius: 6px; padding: 4px 0; min-width: 180px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.ctx-item { padding: 6px 16px; font-size: 13px; color: #cdd6f4; cursor: pointer; }
+.ctx-item:hover { background: rgba(137, 180, 250, 0.15); }
 </style>

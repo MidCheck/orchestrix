@@ -143,17 +143,23 @@ export const useEditorStore = defineStore('editor', () => {
     const uiStore = useUIStore()
     const wsStore = useWorkspaceStore()
 
-    // 如果文件已打开，在对应 group 中激活
-    for (const [gid, group] of Object.entries(groups.value)) {
-      if (group.files.includes(filePath)) {
-        group.activeFile = filePath
-        activeGroupId.value = gid
-        uiStore.switchToEditor()
-        return
-      }
+    // 确定目标 group
+    let gid = targetGroupId || activeGroupId.value
+    if (!gid || !groups.value[gid]) {
+      gid = nextGroupId()
+      groups.value[gid] = { id: gid, files: [], activeFile: null }
+      layoutRoot.value = { type: 'leaf', groupId: gid }
     }
 
-    // 读取文件
+    // 同一 group 内已打开该文件 → 直接激活（不重复添加 tab）
+    if (groups.value[gid].files.includes(filePath)) {
+      groups.value[gid].activeFile = filePath
+      activeGroupId.value = gid
+      uiStore.switchToEditor()
+      return
+    }
+
+    // 确保文件数据已加载（多个 group 可共享同一份 openFile 数据）
     const existing = openFiles.value.find((f) => f.path === filePath)
     if (!existing) {
       const result = await window.electronAPI.workspace.readFile(filePath)
@@ -168,17 +174,10 @@ export const useEditorStore = defineStore('editor', () => {
         size: result.size,
         hexHead: result.hexHead
       })
+      window.electronAPI.workspace.watchFile(filePath).catch(() => {})
     }
 
-    // 确定目标 group
-    let gid = targetGroupId || activeGroupId.value
-    if (!gid || !groups.value[gid]) {
-      // 创建第一个 group
-      gid = nextGroupId()
-      groups.value[gid] = { id: gid, files: [], activeFile: null }
-      layoutRoot.value = { type: 'leaf', groupId: gid }
-    }
-
+    // 在目标 group 中添加 tab
     groups.value[gid].files.push(filePath)
     groups.value[gid].activeFile = filePath
     activeGroupId.value = gid
@@ -403,6 +402,32 @@ export const useEditorStore = defineStore('editor', () => {
     return openFiles.value.find((f) => f.path === filePath)
   }
 
+  // 外部文件变更时刷新内容（如 CLI 修改了文件）
+  async function reloadFile(filePath: string): Promise<void> {
+    const file = openFiles.value.find((f) => f.path === filePath)
+    if (!file) return
+    // 如果用户有未保存的修改，不自动覆盖
+    if (file.content !== file.savedContent) return
+    try {
+      const result = await window.electronAPI.workspace.readFile(filePath)
+      if (result.kind === 'text') {
+        file.content = result.content
+        file.savedContent = result.content
+      }
+    } catch { /* file may have been deleted */ }
+  }
+
+  // 初始化文件变更监听
+  let fileChangeCleanup: (() => void) | null = null
+  function initFileWatcher(): void {
+    if (fileChangeCleanup) return
+    fileChangeCleanup = window.electronAPI.workspace.onFileChanged((filePath) => {
+      reloadFile(filePath)
+    })
+  }
+  // 首次调用时初始化
+  initFileWatcher()
+
   return {
     openFiles,
     layoutRoot,
@@ -425,6 +450,7 @@ export const useEditorStore = defineStore('editor', () => {
     saveCursorState,
     getCursorState,
     getFileByPath,
+    reloadFile,
     saveCurrentLayout,
     restoreLayout
   }

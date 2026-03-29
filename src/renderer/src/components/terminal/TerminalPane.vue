@@ -8,11 +8,13 @@ const props = defineProps<{
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-const { init } = useTerminal(containerRef, props.terminalId, props.cwd)
+const { init, restart } = useTerminal(containerRef, props.terminalId, props.cwd)
 
 onMounted(() => {
   init()
 })
+
+defineExpose({ restart })
 </script>
 
 <template>

@@ -11,19 +11,17 @@ async function handleAddProject(): Promise<void> {
   if (!project) return
 
   // 自动为项目创建终端面板
-  if (uiStore.panes.length < 3) {
-    const id = `pane-${Date.now()}`
-    const terminalId = `term-${Date.now()}`
-    uiStore.addPane({
-      id,
-      terminalId,
-      projectId: project.id,
-      projectName: project.name,
-      projectPath: project.path,
-      agentId: null,
-      title: project.name
-    })
-  }
+  const id = `pane-${Date.now()}`
+  const terminalId = `term-${Date.now()}`
+  uiStore.addPane({
+    id,
+    terminalId,
+    projectId: project.id,
+    projectName: project.name,
+    projectPath: project.path,
+    agentId: null,
+    title: project.name
+  })
 }
 
 function handleSelectProject(id: string): void {
@@ -32,7 +30,7 @@ function handleSelectProject(id: string): void {
   const pane = uiStore.panes.find((p) => p.projectId === id)
   if (pane) {
     uiStore.setActivePane(pane.id)
-  } else if (uiStore.panes.length < 3) {
+  } else {
     // 没有绑定的 shell，自动创建
     const project = workspaceStore.projects.find((p) => p.id === id)
     if (project) {
