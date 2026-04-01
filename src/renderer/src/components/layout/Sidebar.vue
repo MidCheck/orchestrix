@@ -1,10 +1,41 @@
 <script setup lang="ts">
+import { ref, onMounted } from 'vue'
 import { useWorkspaceStore } from '../../stores/workspace'
 import { useUIStore } from '../../stores/ui'
 import FileTree from '../file-explorer/FileTree.vue'
 
 const workspaceStore = useWorkspaceStore()
 const uiStore = useUIStore()
+
+// LSP 状态
+interface LspServerInfo { id: string; name: string; languages: string[]; installed: boolean; running: boolean }
+const lspServers = ref<LspServerInfo[]>([])
+const lspInstalling = ref<string | null>(null)
+const lspError = ref<string | null>(null)
+
+async function refreshLspStatus(): Promise<void> {
+  lspServers.value = await window.electronAPI.lsp.status()
+}
+
+async function installLsp(serverId: string): Promise<void> {
+  lspInstalling.value = serverId
+  lspError.value = null
+  const result = await window.electronAPI.lsp.install(serverId)
+  lspInstalling.value = null
+  if (!result.success) lspError.value = result.error || 'Install failed'
+  await refreshLspStatus()
+}
+
+async function importLsp(serverId: string): Promise<void> {
+  lspInstalling.value = serverId
+  lspError.value = null
+  const result = await window.electronAPI.lsp.import(serverId)
+  lspInstalling.value = null
+  if (!result.success && result.error !== 'Cancelled') lspError.value = result.error || 'Import failed'
+  await refreshLspStatus()
+}
+
+onMounted(() => refreshLspStatus())
 
 async function handleAddProject(): Promise<void> {
   const project = await workspaceStore.addProject()
@@ -102,6 +133,33 @@ async function handleRemoveProject(id: string): Promise<void> {
       </div>
       <div class="file-tree-container">
         <FileTree />
+      </div>
+    </div>
+
+    <!-- LSP 语言服务 -->
+    <div class="lsp-section">
+      <div class="section-header">
+        <span class="section-title">Language Servers</span>
+      </div>
+      <div class="lsp-list">
+        <div v-for="server in lspServers" :key="server.id" class="lsp-item">
+          <span class="lsp-name">{{ server.name }}</span>
+          <span v-if="server.installed" class="lsp-badge installed">OK</span>
+          <template v-else>
+            <button
+              v-if="lspInstalling !== server.id"
+              class="lsp-btn"
+              @click="installLsp(server.id)"
+            >Install</button>
+            <button
+              v-if="lspInstalling !== server.id"
+              class="lsp-btn import"
+              @click="importLsp(server.id)"
+            >Import</button>
+            <span v-if="lspInstalling === server.id" class="lsp-badge installing">Installing...</span>
+          </template>
+        </div>
+        <div v-if="lspError" class="lsp-error">{{ lspError }}</div>
       </div>
     </div>
   </div>
@@ -234,5 +292,39 @@ async function handleRemoveProject(id: string): Promise<void> {
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
+}
+/* LSP Section — 固定在底部 */
+.lsp-section {
+  flex-shrink: 0;
+  border-top: 1px solid #313244;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.lsp-list { padding: 4px 8px; }
+
+.lsp-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 4px; font-size: 12px; color: #a6adc8;
+}
+
+.lsp-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.lsp-badge {
+  font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 3px;
+}
+.lsp-badge.installed { color: #a6e3a1; background: rgba(166,227,161,0.15); }
+.lsp-badge.installing { color: #f9e2af; }
+
+.lsp-btn {
+  background: none; border: 1px solid #45475a; color: #89b4fa;
+  font-size: 10px; padding: 1px 6px; border-radius: 3px; cursor: pointer;
+}
+.lsp-btn:hover { background: rgba(137,180,250,0.15); }
+.lsp-btn.import { color: #a6adc8; }
+
+.lsp-error {
+  font-size: 10px; color: #f38ba8; padding: 2px 4px;
+  word-break: break-all;
 }
 </style>

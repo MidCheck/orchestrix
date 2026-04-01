@@ -82,6 +82,18 @@ export function useTerminal(
         term.writeln('\r\n\x1b[31mFailed to create terminal session\x1b[0m')
         return
       }
+    } else {
+      // PTY 已存在（布局重建），同步尺寸
+      requestAnimationFrame(() => {
+        if (terminal.value && fitAddon.value) {
+          fitAddon.value.fit()
+          window.electronAPI.terminal.resize({
+            id: terminalId,
+            cols: terminal.value.cols,
+            rows: terminal.value.rows
+          })
+        }
+      })
     }
 
     // 用户输入 -> PTY

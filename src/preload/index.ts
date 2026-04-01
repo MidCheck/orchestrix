@@ -81,6 +81,9 @@ const electronAPI = {
     createDir: (dirPath: string): Promise<void> =>
       ipcRenderer.invoke(IPC.FILE_MKDIR, dirPath),
 
+    searchSymbol: (projectPath: string, pattern: string): Promise<Array<{ file: string; line: number; text: string }>> =>
+      ipcRenderer.invoke(IPC.FILE_SEARCH, projectPath, pattern),
+
     watchFile: (filePath: string): Promise<void> =>
       ipcRenderer.invoke(IPC.FILE_WATCH, filePath),
 
@@ -123,6 +126,44 @@ const electronAPI = {
       }
       ipcRenderer.on(IPC.AGENT_STATUS, handler)
       return () => ipcRenderer.removeListener(IPC.AGENT_STATUS, handler)
+    }
+  },
+
+  // LSP
+  lsp: {
+    status: (): Promise<Array<{ id: string; name: string; languages: string[]; installed: boolean; running: boolean }>> =>
+      ipcRenderer.invoke(IPC.LSP_STATUS),
+
+    install: (serverId: string): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.LSP_INSTALL, serverId),
+
+    import: (serverId: string): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.LSP_IMPORT, serverId),
+
+    start: (serverId: string, projectPath: string): Promise<boolean> =>
+      ipcRenderer.invoke(IPC.LSP_START, serverId, projectPath),
+
+    autoInit: (serverId: string, projectPath: string, filePath: string, languageId: string, content: string): Promise<boolean> =>
+      ipcRenderer.invoke('lsp:auto-init', serverId, projectPath, filePath, languageId, content),
+
+    stop: (serverId: string, projectPath: string): Promise<void> =>
+      ipcRenderer.invoke(IPC.LSP_STOP, serverId, projectPath),
+
+    request: (serverId: string, projectPath: string, id: number, method: string, params: any): Promise<any> =>
+      ipcRenderer.invoke(IPC.LSP_REQUEST, serverId, projectPath, id, method, params),
+
+    notify: (serverId: string, projectPath: string, method: string, params: any): Promise<void> =>
+      ipcRenderer.invoke(IPC.LSP_NOTIFY, serverId, projectPath, method, params),
+
+    debugLog: (serverId: string, projectPath: string): Promise<string[]> =>
+      ipcRenderer.invoke('lsp:debug-log', serverId, projectPath),
+
+    onEvent: (callback: (serverId: string, projectPath: string, message: string) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, serverId: string, projectPath: string, message: string): void => {
+        callback(serverId, projectPath, message)
+      }
+      ipcRenderer.on(IPC.LSP_EVENT, handler)
+      return () => ipcRenderer.removeListener(IPC.LSP_EVENT, handler)
     }
   },
 

@@ -13,8 +13,10 @@ const editorStore = useEditorStore()
 
 // --- 全局快捷键 ---
 function handleKeyDown(e: KeyboardEvent): void {
-  // Ctrl+` 或 Cmd+` 切换图层
-  if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+  const mod = e.ctrlKey || e.metaKey
+
+  // Ctrl/Cmd + ` — 切换 Terminal / Editor 图层
+  if (mod && e.key === '`') {
     e.preventDefault()
     if (uiStore.activeLayer === 'terminal') {
       if (editorStore.layoutRoot) uiStore.switchToEditor()
@@ -24,26 +26,36 @@ function handleKeyDown(e: KeyboardEvent): void {
     return
   }
 
-  // Ctrl+Tab / Cmd+Tab 切换终端面板（仅在终端层）
-  if (e.ctrlKey && e.key === 'Tab' && uiStore.activeLayer === 'terminal') {
-    e.preventDefault()
+  // Alt + ← / Alt + → — 切换终端面板（任何图层都能用）
+  if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
     const panes = uiStore.panes
     if (panes.length < 2) return
+    e.preventDefault()
     const currentIdx = panes.findIndex((p) => p.id === uiStore.activePaneId)
-    const nextIdx = e.shiftKey
+    const nextIdx = e.key === 'ArrowLeft'
       ? (currentIdx - 1 + panes.length) % panes.length
       : (currentIdx + 1) % panes.length
     switchToPane(panes[nextIdx].id)
+    // 如果不在终端层，自动切过去
+    if (uiStore.activeLayer !== 'terminal') uiStore.switchToTerminal()
     return
   }
 
-  // Ctrl+1~9 切换到第 N 个终端面板
-  if (e.ctrlKey && e.key >= '1' && e.key <= '9' && uiStore.activeLayer === 'terminal') {
+  // Ctrl/Cmd + 1~9 — 切换到第 N 个终端
+  if (mod && e.key >= '1' && e.key <= '9') {
     const idx = parseInt(e.key) - 1
     if (idx < uiStore.panes.length) {
       e.preventDefault()
       switchToPane(uiStore.panes[idx].id)
+      if (uiStore.activeLayer !== 'terminal') uiStore.switchToTerminal()
     }
+    return
+  }
+
+  // Ctrl/Cmd + \ — 切换侧边栏
+  if (mod && e.key === '\\') {
+    e.preventDefault()
+    uiStore.toggleSidebar()
     return
   }
 }

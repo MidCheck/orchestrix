@@ -29,6 +29,7 @@ export const IPC = {
   FILE_MKDIR: 'file:mkdir',
   FILE_WATCH: 'file:watch',
   FILE_CHANGED: 'file:changed',
+  FILE_SEARCH: 'file:search',
 
   // Git 相关
   GIT_STATUS: 'git:status',
@@ -36,6 +37,16 @@ export const IPC = {
   GIT_IS_REPO: 'git:is-repo',
   GIT_BLAME: 'git:blame',
   GIT_DIFF_LINES: 'git:diff-lines',
+
+  // LSP
+  LSP_STATUS: 'lsp:status',
+  LSP_INSTALL: 'lsp:install',
+  LSP_IMPORT: 'lsp:import',
+  LSP_START: 'lsp:start',
+  LSP_STOP: 'lsp:stop',
+  LSP_REQUEST: 'lsp:request',
+  LSP_NOTIFY: 'lsp:notify',
+  LSP_EVENT: 'lsp:event',
 
   // 通知
   TERMINAL_NOTIFY: 'terminal:notify',

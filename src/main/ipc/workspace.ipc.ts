@@ -70,6 +70,38 @@ export function registerWorkspaceIPC(workspaceManager: WorkspaceManager): void {
     await workspaceManager.createDirectory(dirPath)
   })
 
+  // 符号搜索（grep -rn）
+  ipcMain.handle(IPC.FILE_SEARCH, async (_event, projectPath: string, pattern: string) => {
+    const { execFile } = require('child_process')
+    const { promisify } = require('util')
+    const exec = promisify(execFile)
+    try {
+      const { stdout } = await exec('grep', [
+        '-rn', '--include=*.ts', '--include=*.js', '--include=*.vue',
+        '--include=*.tsx', '--include=*.jsx', '--include=*.py',
+        '--include=*.go', '--include=*.rs', '--include=*.java',
+        '--include=*.c', '--include=*.cpp', '--include=*.h',
+        '-l', pattern, '.'
+      ], { cwd: projectPath, timeout: 5000, maxBuffer: 1024 * 1024 })
+      // 返回匹配文件列表和行号
+      const { stdout: detailed } = await exec('grep', [
+        '-rn', '--include=*.ts', '--include=*.js', '--include=*.vue',
+        '--include=*.tsx', '--include=*.jsx', '--include=*.py',
+        '--include=*.go', '--include=*.rs', '--include=*.java',
+        '--include=*.c', '--include=*.cpp', '--include=*.h',
+        pattern, '.'
+      ], { cwd: projectPath, timeout: 5000, maxBuffer: 2 * 1024 * 1024 })
+      const results: Array<{ file: string; line: number; text: string }> = []
+      for (const l of detailed.split('\n')) {
+        const m = l.match(/^\.\/(.*?):(\d+):(.*)$/)
+        if (m) results.push({ file: m[1], line: parseInt(m[2]), text: m[3].trim() })
+      }
+      return results.slice(0, 100) // max 100 results
+    } catch {
+      return []
+    }
+  })
+
   // 文件监听
   const watchers = new Map<string, FSWatcher>()
 

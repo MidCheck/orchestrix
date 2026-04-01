@@ -5,15 +5,18 @@ import { registerTerminalIPC } from './ipc/terminal.ipc'
 import { registerWorkspaceIPC } from './ipc/workspace.ipc'
 import { registerAgentIPC } from './ipc/agent.ipc'
 import { registerStoreIPC } from './ipc/store.ipc'
+import { registerLspIPC } from './ipc/lsp.ipc'
 import { TerminalManager } from './managers/terminal-manager'
 import { WorkspaceManager } from './managers/workspace-manager'
 import { AgentManager } from './managers/agent-manager'
+import { LspManager } from './managers/lsp-manager'
 
 let mainWindow: BrowserWindow | null = null
 
 const terminalManager = new TerminalManager()
 const workspaceManager = new WorkspaceManager()
 const agentManager = new AgentManager(terminalManager)
+const lspManager = new LspManager()
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -56,6 +59,7 @@ app.whenReady().then(() => {
   registerWorkspaceIPC(workspaceManager)
   registerAgentIPC(agentManager)
   registerStoreIPC()
+  registerLspIPC(lspManager)
 
   createWindow()
 
@@ -70,6 +74,7 @@ app.on('window-all-closed', () => {
   // 清理所有终端会话
   terminalManager.destroyAll()
   agentManager.killAll()
+  lspManager.stopAll()
 
   if (process.platform !== 'darwin') {
     app.quit()
